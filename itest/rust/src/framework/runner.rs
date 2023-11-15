@@ -428,3 +428,21 @@ impl std::fmt::Display for TestOutcome {
         write!(f, "{col}{outcome}{end}")
     }
 }
+
+/// Class used to check if tests are ran from commandline
+#[derive(GodotClass)]
+#[class(init)]
+pub struct CommandLineChecker {}
+
+#[godot_api]
+impl CommandLineChecker {
+    #[func]
+    fn has_command_env_var() -> bool
+    {
+        let res = std::env::var("ITEST_GDEXT_VAR");
+        if let Ok(val) = res {
+            return val == "ran_from_cmd";
+        }
+        false
+    }
+}

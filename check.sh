@@ -142,6 +142,7 @@ function cmd_test() {
 
 function cmd_itest() {
     findGodot && \
+        export ITEST_GDEXT_VAR="ran_from_cmd" && \
         run cargo build -p itest "${extraCargoArgs[@]}" && \
         run "$godotBin" --path itest/godot --headless -- "[${extraArgs[@]}]"
 }

@@ -6,6 +6,11 @@ extends Node
 class_name GDScriptTestRunner
 
 func _ready():
+  
+	if !CommandLineChecker.has_command_env_var():
+		print("Integration tests must be run from an exported binary, not through the editor.")
+		get_tree().quit(1)
+
 	# Ensure physics is initialized, for tests that require it.
 	await get_tree().physics_frame
 
