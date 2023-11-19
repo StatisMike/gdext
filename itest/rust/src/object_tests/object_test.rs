@@ -13,7 +13,7 @@ use godot::builtin::{GString, StringName, Variant, VariantConversionError, Vecto
 use godot::engine::{
     file_access, Area2D, Camera3D, FileAccess, IRefCounted, Node, Node3D, Object, RefCounted,
 };
-use godot::obj::{Base, Gd, Inherits, InstanceId, RawGd};
+use godot::obj::{Base, Gd, Inherits, InstanceId, RawGd, UserClass};
 use godot::prelude::meta::GodotType;
 use godot::sys::{self, GodotFfi};
 
@@ -25,13 +25,19 @@ use crate::framework::{expect_panic, itest, TestContext};
 
 #[itest]
 fn object_construct_default() {
-    let obj = Gd::<RefcPayload>::new_default();
+    let obj = Gd::<RefcPayload>::default();
+    assert_eq!(obj.bind().value, 111);
+}
+
+#[itest]
+fn object_construct_new_gd() {
+    let obj = RefcPayload::new_gd();
     assert_eq!(obj.bind().value, 111);
 }
 
 #[itest]
 fn object_construct_value() {
-    let obj = Gd::new(RefcPayload { value: 222 });
+    let obj = Gd::from_object(RefcPayload { value: 222 });
     assert_eq!(obj.bind().value, 222);
 }
 
@@ -73,7 +79,7 @@ fn object_user_roundtrip_return() {
     let value: i16 = 17943;
     let user = RefcPayload { value };
 
-    let obj: Gd<RefcPayload> = Gd::new(user);
+    let obj: Gd<RefcPayload> = Gd::from_object(user);
     assert_eq!(obj.bind().value, value);
 
     let raw = obj.to_ffi();
@@ -90,7 +96,7 @@ fn object_user_roundtrip_write() {
     let value: i16 = 17943;
     let user = RefcPayload { value };
 
-    let obj: Gd<RefcPayload> = Gd::new(user);
+    let obj: Gd<RefcPayload> = Gd::from_object(user);
     assert_eq!(obj.bind().value, value);
     let raw = obj.to_ffi();
 
@@ -109,20 +115,20 @@ fn object_engine_roundtrip() {
 
     let mut obj: Gd<Node3D> = Node3D::new_alloc();
     obj.set_position(pos);
-    assert_eq!(obj.position(), pos);
+    assert_eq!(obj.get_position(), pos);
 
     let raw = obj.to_ffi();
     let ptr = raw.sys();
 
     let raw2 = unsafe { RawGd::<Node3D>::from_sys(ptr) };
     let obj2 = Gd::from_ffi(raw2);
-    assert_eq!(obj2.position(), pos);
+    assert_eq!(obj2.get_position(), pos);
     obj.free();
 }
 
 #[itest]
 fn object_user_display() {
-    let obj = Gd::new(RefcPayload { value: 774 });
+    let obj = Gd::from_object(RefcPayload { value: 774 });
 
     let actual = format!(".:{obj}:.");
     let expected = ".:value=774:.".to_string();
@@ -159,7 +165,7 @@ fn object_instance_id() {
     let value: i16 = 17943;
     let user = RefcPayload { value };
 
-    let obj: Gd<RefcPayload> = Gd::new(user);
+    let obj: Gd<RefcPayload> = Gd::from_object(user);
     let id = obj.instance_id();
 
     let obj2 = Gd::<RefcPayload>::from_instance_id(id);
@@ -198,7 +204,7 @@ fn object_from_instance_id_inherits_type() {
 
     let node_as_base = Gd::<Node>::from_instance_id(id);
     assert_eq!(node_as_base.instance_id(), id);
-    assert_eq!(node_as_base.editor_description(), descr);
+    assert_eq!(node_as_base.get_editor_description(), descr);
 
     node_as_base.free();
 }
@@ -219,14 +225,14 @@ fn object_from_instance_id_unrelated_type() {
 
 #[itest]
 fn object_new_has_instance_id() {
-    let obj = Gd::<ObjPayload>::new_default();
+    let obj = ObjPayload::alloc_gd();
     let _id = obj.instance_id();
     obj.free();
 }
 
 #[itest]
 fn object_dynamic_free() {
-    let mut obj = Gd::<ObjPayload>::new_default();
+    let mut obj = ObjPayload::alloc_gd();
     let id = obj.instance_id();
 
     obj.call("free".into(), &[]);
@@ -240,7 +246,7 @@ fn object_dynamic_free() {
 
 #[itest]
 fn object_user_bind_after_free() {
-    let obj = Gd::new(ObjPayload {});
+    let obj = Gd::from_object(ObjPayload {});
     let copy = obj.clone();
     obj.free();
 
@@ -251,7 +257,7 @@ fn object_user_bind_after_free() {
 
 #[itest]
 fn object_user_free_during_bind() {
-    let obj = Gd::new(ObjPayload {});
+    let obj = Gd::from_object(ObjPayload {});
     let guard = obj.bind();
 
     let copy = obj.clone(); // TODO clone allowed while bound?
@@ -277,7 +283,7 @@ fn object_user_dynamic_free_during_bind() {
     // 3. Holding a guard (GdRef/GdMut) across function calls -- not possible, guard's lifetime is coupled to a Gd and cannot be stored in
     //    fields or global variables due to that.
 
-    let obj = Gd::new(ObjPayload {});
+    let obj = Gd::from_object(ObjPayload {});
     let guard = obj.bind();
 
     let mut copy = obj.clone(); // TODO clone allowed while bound?
@@ -297,7 +303,7 @@ fn object_user_dynamic_free_during_bind() {
 
 #[itest]
 fn object_user_call_after_free() {
-    let obj = Gd::new(ObjPayload {});
+    let obj = Gd::from_object(ObjPayload {});
     let mut copy = obj.clone();
     obj.free();
 
@@ -313,7 +319,7 @@ fn object_engine_use_after_free() {
     node.free();
 
     expect_panic("call method on dead engine object", move || {
-        copy.position();
+        copy.get_position();
     });
 }
 
@@ -334,9 +340,9 @@ fn object_user_eq() {
     let a = RefcPayload { value };
     let b = RefcPayload { value };
 
-    let a1 = Gd::new(a);
+    let a1 = Gd::from_object(a);
     let a2 = a1.clone();
-    let b1 = Gd::new(b);
+    let b1 = Gd::from_object(b);
 
     assert_eq!(a1, a2);
     assert_ne!(a1, b1);
@@ -387,7 +393,7 @@ fn object_user_convert_variant() {
     let value: i16 = 17943;
     let user = RefcPayload { value };
 
-    let obj: Gd<RefcPayload> = Gd::new(user);
+    let obj: Gd<RefcPayload> = Gd::from_object(user);
     let variant = obj.to_variant();
     let obj2 = Gd::<RefcPayload>::from_variant(&variant);
 
@@ -404,13 +410,13 @@ fn object_engine_convert_variant() {
     let variant = obj.to_variant();
     let obj2 = Gd::<Node3D>::from_variant(&variant);
 
-    assert_eq!(obj2.position(), pos);
+    assert_eq!(obj2.get_position(), pos);
     obj.free();
 }
 
 #[itest]
 fn object_user_convert_variant_refcount() {
-    let obj: Gd<RefcPayload> = Gd::new(RefcPayload { value: -22222 });
+    let obj: Gd<RefcPayload> = Gd::from_object(RefcPayload { value: -22222 });
     let obj = obj.upcast::<RefCounted>();
     check_convert_variant_refcount(obj)
 }
@@ -424,26 +430,26 @@ fn object_engine_convert_variant_refcount() {
 /// Converts between Object <-> Variant and verifies the reference counter at each stage.
 fn check_convert_variant_refcount(obj: Gd<RefCounted>) {
     // Freshly created -> refcount 1
-    assert_eq!(obj.reference_count(), 1);
+    assert_eq!(obj.get_reference_count(), 1);
 
     {
         // Variant created from object -> increment
         let variant = obj.to_variant();
-        assert_eq!(obj.reference_count(), 2);
+        assert_eq!(obj.get_reference_count(), 2);
 
         {
             // Yet another object created *from* variant -> increment
             let another_object = variant.to::<Gd<RefCounted>>();
-            assert_eq!(obj.reference_count(), 3);
-            assert_eq!(another_object.reference_count(), 3);
+            assert_eq!(obj.get_reference_count(), 3);
+            assert_eq!(another_object.get_reference_count(), 3);
         }
 
         // `another_object` destroyed -> decrement
-        assert_eq!(obj.reference_count(), 2);
+        assert_eq!(obj.get_reference_count(), 2);
     }
 
     // `variant` destroyed -> decrement
-    assert_eq!(obj.reference_count(), 1);
+    assert_eq!(obj.get_reference_count(), 1);
 }
 
 #[itest]
@@ -472,7 +478,7 @@ fn object_engine_returned_refcount() {
     assert!(file.is_open());
 
     // There was a bug which incremented ref-counts of just-returned objects, keep this as regression test.
-    assert_eq!(file.reference_count(), 1);
+    assert_eq!(file.get_reference_count(), 1);
 }
 
 #[itest]
@@ -540,7 +546,7 @@ fn object_engine_downcast() {
     let node3d: Gd<Node3D> = node.try_cast::<Node3D>().expect("try_cast");
 
     assert_eq!(node3d.instance_id(), id);
-    assert_eq!(node3d.position(), pos);
+    assert_eq!(node3d.get_position(), pos);
 
     node3d.free();
 }
@@ -553,7 +559,7 @@ struct CustomClassB {}
 
 #[itest]
 fn object_reject_invalid_downcast() {
-    let instance = Gd::new(CustomClassA {});
+    let instance = Gd::from_object(CustomClassA {});
     let object = instance.upcast::<Object>();
 
     assert!(object.try_cast::<CustomClassB>().is_none());
@@ -561,7 +567,7 @@ fn object_reject_invalid_downcast() {
 
 #[itest]
 fn variant_reject_invalid_downcast() {
-    let variant = Gd::new(CustomClassA {}).to_variant();
+    let variant = Gd::from_object(CustomClassA {}).to_variant();
 
     assert!(variant.try_to::<Gd<CustomClassB>>().is_err());
     assert!(variant.try_to::<Gd<CustomClassA>>().is_ok());
@@ -607,7 +613,7 @@ fn object_engine_accept_polymorphic() {
 
 #[itest]
 fn object_user_accept_polymorphic() {
-    let obj = Gd::new(RefcPayload { value: 123 });
+    let obj = Gd::from_object(RefcPayload { value: 123 });
     let expected_class = GString::from("RefcPayload");
 
     let actual_class = accept_refcounted(obj.clone());
@@ -622,7 +628,7 @@ where
     T: Inherits<Node>,
 {
     let up = node.upcast();
-    up.name()
+    up.get_name()
 }
 
 fn accept_refcounted<T>(node: Gd<T>) -> GString
@@ -715,7 +721,7 @@ fn object_engine_refcounted_free() {
 
 #[itest]
 fn object_user_double_free() {
-    let mut obj = Gd::<ObjPayload>::new_default();
+    let mut obj = ObjPayload::alloc_gd();
     let obj2 = obj.clone();
     obj.call("free".into(), &[]);
 
@@ -728,7 +734,7 @@ fn object_user_double_free() {
 fn object_user_share_drop() {
     let drop_count = Rc::new(RefCell::new(0));
 
-    let object: Gd<Tracker> = Gd::new(Tracker {
+    let object: Gd<Tracker> = Gd::from_object(Tracker {
         drop_count: Rc::clone(&drop_count),
     });
     assert_eq!(*drop_count.borrow(), 0);
@@ -802,7 +808,7 @@ impl ObjPayload {
 fn user_refc_instance() -> Gd<RefcPayload> {
     let value: i16 = 17943;
     let user = RefcPayload { value };
-    Gd::new(user)
+    Gd::from_object(user)
 }
 
 #[derive(GodotClass, Eq, PartialEq, Debug)]
@@ -873,7 +879,7 @@ pub mod object_test_gd {
 
         #[func]
         fn return_object(&self) -> Gd<Object> {
-            Gd::new(MockObjRust { i: 42 }).upcast()
+            Gd::from_object(MockObjRust { i: 42 }).upcast()
         }
 
         #[func]
@@ -888,12 +894,12 @@ pub mod object_test_gd {
 
         #[func]
         fn return_refcounted(&self) -> Gd<RefCounted> {
-            Gd::new(MockRefCountedRust { i: 42 }).upcast()
+            Gd::from_object(MockRefCountedRust { i: 42 }).upcast()
         }
 
         #[func]
         fn return_refcounted_as_object(&self) -> Gd<Object> {
-            Gd::new(MockRefCountedRust { i: 42 }).upcast()
+            Gd::from_object(MockRefCountedRust { i: 42 }).upcast()
         }
     }
 
@@ -910,7 +916,7 @@ pub mod object_test_gd {
     impl CustomConstructor {
         #[func]
         pub fn construct_object(val: i64) -> Gd<CustomConstructor> {
-            Gd::with_base(|_base| Self { val })
+            Gd::from_init_fn(|_base| Self { val })
         }
     }
 }
@@ -944,8 +950,8 @@ impl DoubleUse {
 /// This test is not signal-specific, the original bug would happen whenever Godot would call a method that takes `&self`.
 #[itest]
 fn double_use_reference() {
-    let double_use: Gd<DoubleUse> = Gd::new_default();
-    let emitter: Gd<ObjPayload> = Gd::new_default();
+    let double_use: Gd<DoubleUse> = DoubleUse::alloc_gd();
+    let emitter: Gd<ObjPayload> = ObjPayload::alloc_gd();
 
     emitter
         .clone()

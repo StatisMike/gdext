@@ -53,7 +53,8 @@ pub type GodotString = GString;
 ///
 /// Godot also provides two separate string classes with slightly different semantics: [`StringName`] and [`NodePath`].
 #[doc(alias = "String")]
-#[repr(C, align(8))]
+// #[repr] is needed on GString itself rather than the opaque field, because PackedStringArray::as_slice() relies on a packed representation.
+#[repr(transparent)]
 pub struct GString {
     opaque: OpaqueString,
 }
@@ -68,20 +69,20 @@ impl GString {
         Self { opaque }
     }
 
+    pub fn len(&self) -> usize {
+        self.as_inner().length().try_into().unwrap()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.as_inner().is_empty()
+    }
+
     /// Returns a 32-bit integer hash value representing the string.
     pub fn hash(&self) -> u32 {
         self.as_inner()
             .hash()
             .try_into()
             .expect("Godot hashes are uint32_t")
-    }
-
-    /// Move `self` into a system pointer. This transfers ownership and thus does not call the destructor.
-    ///
-    /// # Safety
-    /// `dst` must be a pointer to a `GString` which is suitable for ffi with Godot.
-    pub unsafe fn move_string_ptr(self, dst: sys::GDExtensionStringPtr) {
-        self.move_return_ptr(dst as *mut _, sys::PtrcallType::Standard);
     }
 
     /// Gets the internal chars slice from a [`GString`].
@@ -129,6 +130,14 @@ impl GString {
         fn from_string_sys = from_sys;
         fn from_string_sys_init = from_sys_init;
         fn string_sys = sys;
+    }
+
+    /// Move `self` into a system pointer. This transfers ownership and thus does not call the destructor.
+    ///
+    /// # Safety
+    /// `dst` must be a pointer to a `GString` which is suitable for ffi with Godot.
+    pub(crate) unsafe fn move_string_ptr(self, dst: sys::GDExtensionStringPtr) {
+        self.move_return_ptr(dst as *mut _, sys::PtrcallType::Standard);
     }
 
     #[doc(hidden)]

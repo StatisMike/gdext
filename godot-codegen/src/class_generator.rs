@@ -8,7 +8,6 @@
 
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
-use std::borrow::Cow;
 use std::path::Path;
 
 use crate::api_parser::*;
@@ -442,19 +441,24 @@ fn make_module_doc(class_name: &TyName) -> String {
     )
 }
 
-fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
+fn make_constructor_and_default(
+    class: &Class,
+    class_name: &TyName,
+    ctx: &Context,
+) -> (TokenStream, TokenStream) {
     let godot_class_name = &class.name;
     let godot_class_stringname = make_string_name(godot_class_name);
     // Note: this could use class_name() but is not yet done due to upcoming lazy-load refactoring.
     //let class_name_obj = quote! { <Self as crate::obj::GodotClass>::class_name() };
 
+    let (constructor, godot_default_impl);
     if ctx.is_singleton(godot_class_name) {
         // Note: we cannot return &'static mut Self, as this would be very easy to mutably alias.
         // &'static Self would be possible, but we would lose the whole mutability information (even if that is best-effort and
         // not strict Rust mutability, it makes the API much more usable).
         // As long as the user has multiple Gd smart pointers to the same singletons, only the internal raw pointers are aliased.
         // See also Deref/DerefMut impl for Gd.
-        quote! {
+        constructor = quote! {
             pub fn singleton() -> Gd<Self> {
                 unsafe {
                     let __class_name = #godot_class_stringname;
@@ -462,13 +466,15 @@ fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
                     Gd::from_obj_sys(__object_ptr)
                 }
             }
-        }
+        };
+        godot_default_impl = TokenStream::new();
     } else if !class.is_instantiable {
         // Abstract base classes or non-singleton classes without constructor
-        TokenStream::new()
+        constructor = TokenStream::new();
+        godot_default_impl = TokenStream::new();
     } else if class.is_refcounted {
         // RefCounted, Resource, etc
-        quote! {
+        constructor = quote! {
             pub fn new() -> Gd<Self> {
                 unsafe {
                     let class_name = #godot_class_stringname;
@@ -476,10 +482,17 @@ fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
                     Gd::from_obj_sys(object_ptr)
                 }
             }
-        }
+        };
+        godot_default_impl = quote! {
+            impl crate::obj::cap::GodotDefault for #class_name {
+                fn __godot_default() -> crate::obj::Gd<Self> {
+                    Self::new()
+                }
+            }
+        };
     } else {
         // Manually managed classes: Object, Node etc
-        quote! {
+        constructor = quote! {
             #[must_use]
             pub fn new_alloc() -> Gd<Self> {
                 unsafe {
@@ -488,8 +501,11 @@ fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
                     Gd::from_obj_sys(object_ptr)
                 }
             }
-        }
+        };
+        godot_default_impl = TokenStream::new();
     }
+
+    (constructor, godot_default_impl)
 }
 
 fn make_class(class: &Class, class_name: &TyName, ctx: &mut Context) -> GeneratedClass {
@@ -507,7 +523,7 @@ fn make_class(class: &Class, class_name: &TyName, ctx: &mut Context) -> Generate
         None => (quote! { () }, None),
     };
 
-    let constructor = make_constructor(class, ctx);
+    let (constructor, godot_default_impl) = make_constructor_and_default(class, class_name, ctx);
     let api_level = util::get_api_level(class);
     let init_level = api_level.to_init_level();
 
@@ -641,7 +657,7 @@ fn make_class(class: &Class, class_name: &TyName, ctx: &mut Context) -> Generate
             )*
 
             #exportable_impl
-
+            #godot_default_impl
             #deref_impl
 
             #[macro_export]
@@ -1129,31 +1145,28 @@ fn make_class_method_definition(
 
     let class_name_str = &class_name.godot_ty;
     let godot_method_name = &method.name;
-    let renamed_method_name = special_cases::maybe_renamed(class_name, godot_method_name);
+    let rust_method_name = special_cases::maybe_renamed(class_name, godot_method_name);
 
-    let mut rust_method_name = Cow::Borrowed(renamed_method_name);
+    // Override const-qualification for known special cases (FileAccess::get_16, StreamPeer::get_u16, etc.).
+    /* TODO enable this once JSON/domain models are separated. Remove #[allow] above.
     let mut override_is_const = None;
-
-    if method.map_args(|args| args.is_empty()) {
-        // Getters (i.e. 0 arguments) are stripped of their `get_` prefix, to conform to Rust convention.
-        // Currently also applies to static methods, but NOT to methods which have default parameters but can be called with 0 arguments.
-        // TODO(bromeon): should we add #[doc(alias)]?
-        if let Some(remainder) = renamed_method_name.strip_prefix("get_") {
-            // Do not apply for FileAccess::get_16, StreamPeer::get_u16, etc.
-            if !special_cases::keeps_get_prefix(class_name, method) {
-                rust_method_name = Cow::Owned(remainder.to_string());
-
-                // Many getters are mutably qualified (GltfAccessor::get_max, CameraAttributes::get_exposure_multiplier, ...).
-                override_is_const = Some(true);
-            }
-        }
+    if let Some(override_const) = special_cases::is_method_const(class_name, &method) {
+        override_is_const = Some(override_const);
     }
 
-    let rust_method_name = rust_method_name.as_ref();
+    // Getters in particular are re-qualified as const (if there isn't already an override).
+    if override_is_const.is_none() && option_as_slice(&method.arguments).is_empty() {
+        if rust_method_name.starts_with("get_") {
+            // Many getters are mutably qualified (GltfAccessor::get_max, CameraAttributes::get_exposure_multiplier, ...).
+            // As a default, set those to const.
+            override_is_const = Some(true);
+        }
+    }*/
 
     let receiver = make_receiver(
         method.is_static,
-        override_is_const.unwrap_or(method.is_const),
+        //override_is_const.unwrap_or(method.is_const),
+        method.is_const,
         quote! { self.object_ptr },
     );
 
@@ -1912,8 +1925,8 @@ fn make_all_virtual_methods(
         all_virtuals.extend(
             get_methods_in_class(class)
                 .iter()
-                .cloned()
-                .filter(|m| m.is_virtual),
+                .filter(|m| m.is_virtual)
+                .cloned(),
         );
     };
 
