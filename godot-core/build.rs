@@ -13,6 +13,22 @@ fn main() {
     let gen_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gen"));
 
     if gen_path.exists() {
+        // To handle some CI errors
+        let mut retry_count = 0;
+
+        loop {
+           match std::fs::remove_dir_all(gen_path) {
+            Ok(_) => break,
+            Err(err) => {
+                if retry_count <= 5 {
+                    panic!("failed to delete dir: {err} in path: {}", gen_path.display());
+                }
+                retry_count += 1;
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            },
+            }    
+        }
+
         std::fs::remove_dir_all(gen_path).unwrap_or_else(|e| panic!("failed to delete dir: {e}"));
     }
 
