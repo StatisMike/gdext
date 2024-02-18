@@ -5,19 +5,20 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use crate::util;
-use crate::util::ident;
+use crate::util::{bail_fn, ident};
+use crate::{util, ParseResult};
 use proc_macro2::{Group, Ident, TokenStream, TokenTree};
 use quote::{format_ident, quote};
 
 /// Information used for registering a Rust function with Godot.
 pub struct FuncDefinition {
     /// Raw information about the Rust function.
-    pub func: venial::Function,
+    pub signature: venial::Function,
     /// The function's non-gdext attributes (all except #[func]).
     pub external_attributes: Vec<venial::Attribute>,
     /// The name the function will be exposed as in Godot. If `None`, the Rust function name is used.
     pub rename: Option<String>,
+    pub is_virtual: bool,
     pub has_gd_self: bool,
 }
 
@@ -33,10 +34,13 @@ pub fn make_virtual_callback(
     let method_name = &signature_info.method_name;
 
     let wrapped_method = make_forwarding_closure(class_name, &signature_info, before_kind);
-    let sig_tuple =
-        util::make_signature_tuple_type(&signature_info.ret_type, &signature_info.param_types);
+    let sig_tuple = signature_info.tuple_type();
 
-    let invocation = make_ptrcall_invocation(method_name, &sig_tuple, &wrapped_method, true);
+    let call_ctx = make_call_context(
+        class_name.to_string().as_str(),
+        method_name.to_string().as_str(),
+    );
+    let invocation = make_ptrcall_invocation(&call_ctx, &sig_tuple, &wrapped_method, true);
 
     quote! {
         {
@@ -58,31 +62,37 @@ pub fn make_virtual_callback(
 pub fn make_method_registration(
     class_name: &Ident,
     func_definition: FuncDefinition,
-) -> TokenStream {
+) -> ParseResult<TokenStream> {
     let signature_info = into_signature_info(
-        func_definition.func,
+        func_definition.signature,
         class_name,
         func_definition.has_gd_self,
     );
-    let sig_tuple =
-        util::make_signature_tuple_type(&signature_info.ret_type, &signature_info.param_types);
+    let sig_tuple = signature_info.tuple_type();
 
-    let method_flags = make_method_flags(signature_info.receiver_type);
+    let is_virtual = func_definition.is_virtual;
+    let method_flags = match make_method_flags(signature_info.receiver_type, is_virtual) {
+        Ok(mf) => mf,
+        Err(msg) => return bail_fn(msg, signature_info.method_name),
+    };
 
     let forwarding_closure =
         make_forwarding_closure(class_name, &signature_info, BeforeKind::Without);
 
-    let method_name = &signature_info.method_name;
-    let varcall_func = make_varcall_func(method_name, &sig_tuple, &forwarding_closure);
-    let ptrcall_func = make_ptrcall_func(method_name, &sig_tuple, &forwarding_closure);
-
     // String literals
+    let method_name = &signature_info.method_name;
     let class_name_str = class_name.to_string();
     let method_name_str = if let Some(rename) = func_definition.rename {
         rename
     } else {
         method_name.to_string()
     };
+
+    let call_ctx = make_call_context(&class_name_str, &method_name_str);
+    let varcall_func = make_varcall_func(&call_ctx, &sig_tuple, &forwarding_closure);
+    let ptrcall_func = make_ptrcall_func(&call_ctx, &sig_tuple, &forwarding_closure);
+
+    // String literals II
     let param_ident_strs = signature_info
         .param_idents
         .into_iter()
@@ -94,7 +104,7 @@ pub fn make_method_registration(
         .into_iter()
         .collect::<Vec<_>>();
 
-    quote! {
+    let registration = quote! {
         #(#cfg_attrs)*
         {
             use ::godot::obj::GodotClass;
@@ -114,15 +124,15 @@ pub fn make_method_registration(
             // `get_ptrcall_func` upholds all the requirements for `ptrcall_func`
             let method_info = unsafe {
                 ClassMethodInfo::from_signature::<Sig>(
-                #class_name::class_name(),
-                method_name,
-                Some(varcall_func),
-                Some(ptrcall_func),
-                #method_flags,
-                &[
-                    #( #param_ident_strs ),*
-                ],
-                Vec::new()
+                    #class_name::class_name(),
+                    method_name,
+                    Some(varcall_func),
+                    Some(ptrcall_func),
+                    #method_flags,
+                    &[
+                        #( #param_ident_strs ),*
+                    ],
+                    Vec::new()
                 )
             };
 
@@ -132,16 +142,18 @@ pub fn make_method_registration(
                 #method_name_str
             );
 
-
+            // Note: information whether the method is virtual is stored in method method_info's flags.
             method_info.register_extension_class_method();
         };
-    }
+    };
+
+    Ok(registration)
 }
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
 // Implementation
 
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ReceiverType {
     Ref,
     Mut,
@@ -149,6 +161,7 @@ pub enum ReceiverType {
     Static,
 }
 
+#[derive(Debug)]
 pub struct SignatureInfo {
     pub method_name: Ident,
     pub receiver_type: ReceiverType,
@@ -166,6 +179,11 @@ impl SignatureInfo {
             param_types: vec![],
             ret_type: quote! { () },
         }
+    }
+
+    pub fn tuple_type(&self) -> TokenStream {
+        // Note: for GdSelf receivers, first parameter is not even part of SignatureInfo anymore.
+        util::make_signature_tuple_type(&self.ret_type, &self.param_types)
     }
 }
 
@@ -291,6 +309,7 @@ pub(crate) fn into_signature_info(
     } else {
         ReceiverType::Static
     };
+
     let num_params = signature.params.inner.len();
     let mut param_idents = Vec::with_capacity(num_params);
     let mut param_types = Vec::with_capacity(num_params);
@@ -344,25 +363,44 @@ pub(crate) fn into_signature_info(
     }
 }
 
-fn make_method_flags(method_type: ReceiverType) -> TokenStream {
-    match method_type {
-        ReceiverType::Ref | ReceiverType::Mut | ReceiverType::GdSelf => {
-            quote! { ::godot::engine::global::MethodFlags::DEFAULT }
+fn make_method_flags(
+    method_type: ReceiverType,
+    is_rust_virtual: bool,
+) -> Result<TokenStream, String> {
+    let scope = quote! { ::godot::engine::global::MethodFlags };
+
+    let base_flags = match method_type {
+        ReceiverType::Ref => {
+            quote! { #scope::NORMAL | #scope::CONST }
+        }
+        // Conservatively assume Gd<Self> receivers to mutate the object, since user can call bind_mut().
+        ReceiverType::Mut | ReceiverType::GdSelf => {
+            quote! { #scope::NORMAL }
         }
         ReceiverType::Static => {
-            quote! { ::godot::engine::global::MethodFlags::STATIC }
+            if is_rust_virtual {
+                return Err("Static methods cannot be virtual".to_string());
+            }
+            quote! { #scope::STATIC }
         }
-    }
+    };
+
+    let flags = if is_rust_virtual {
+        quote! { #base_flags | #scope::VIRTUAL }
+    } else {
+        base_flags
+    };
+
+    Ok(flags)
 }
 
 /// Generate code for a C FFI function that performs a varcall.
 fn make_varcall_func(
-    method_name: &Ident,
+    call_ctx: &TokenStream,
     sig_tuple: &TokenStream,
     wrapped_method: &TokenStream,
 ) -> TokenStream {
-    let invocation = make_varcall_invocation(method_name, sig_tuple, wrapped_method);
-    let method_name_str = method_name.to_string();
+    let invocation = make_varcall_invocation(call_ctx, sig_tuple, wrapped_method);
 
     quote! {
         {
@@ -370,18 +408,19 @@ fn make_varcall_func(
                 _method_data: *mut std::ffi::c_void,
                 instance_ptr: sys::GDExtensionClassInstancePtr,
                 args_ptr: *const sys::GDExtensionConstVariantPtr,
-                _arg_count: sys::GDExtensionInt,
+                arg_count: sys::GDExtensionInt,
                 ret: sys::GDExtensionVariantPtr,
                 err: *mut sys::GDExtensionCallError,
             ) {
                 let success = ::godot::private::handle_panic(
-                    || #method_name_str,
+                    || #call_ctx,
                     || #invocation
                 );
 
                 if success.is_none() {
-                    // Signal error and set return type to Nil
-                    (*err).error = sys::GDEXTENSION_CALL_ERROR_INVALID_METHOD; // no better fitting enum?
+                    // Signal error and set return type to Nil.
+                    // None of the sys::GDEXTENSION_CALL_ERROR enums fits; so we use our own outside Godot's official range.
+                    (*err).error = sys::GODOT_RUST_CALL_ERROR;
 
                     // TODO(uninit)
                     sys::interface_fn!(variant_new_nil)(sys::AsUninit::as_uninit(ret));
@@ -395,12 +434,11 @@ fn make_varcall_func(
 
 /// Generate code for a C FFI function that performs a ptrcall.
 fn make_ptrcall_func(
-    method_name: &Ident,
+    call_ctx: &TokenStream,
     sig_tuple: &TokenStream,
     wrapped_method: &TokenStream,
 ) -> TokenStream {
-    let invocation = make_ptrcall_invocation(method_name, sig_tuple, wrapped_method, false);
-    let method_name_str = method_name.to_string();
+    let invocation = make_ptrcall_invocation(call_ctx, sig_tuple, wrapped_method, false);
 
     quote! {
         {
@@ -411,7 +449,7 @@ fn make_ptrcall_func(
                 ret: sys::GDExtensionTypePtr,
             ) {
                 let success = ::godot::private::handle_panic(
-                    || #method_name_str,
+                    || #call_ctx,
                     || #invocation
                 );
 
@@ -427,13 +465,11 @@ fn make_ptrcall_func(
 
 /// Generate code for a `ptrcall` call expression.
 fn make_ptrcall_invocation(
-    method_name: &Ident,
+    call_ctx: &TokenStream,
     sig_tuple: &TokenStream,
     wrapped_method: &TokenStream,
     is_virtual: bool,
 ) -> TokenStream {
-    let method_name_str = method_name.to_string();
-
     let ptrcall_type = if is_virtual {
         quote! { sys::PtrcallType::Virtual }
     } else {
@@ -443,7 +479,7 @@ fn make_ptrcall_invocation(
     quote! {
          <#sig_tuple as ::godot::builtin::meta::PtrcallSignatureTuple>::in_ptrcall(
             instance_ptr,
-            #method_name_str,
+            & #call_ctx,
             args_ptr,
             ret,
             #wrapped_method,
@@ -454,20 +490,25 @@ fn make_ptrcall_invocation(
 
 /// Generate code for a `varcall()` call expression.
 fn make_varcall_invocation(
-    method_name: &Ident,
+    call_ctx: &TokenStream,
     sig_tuple: &TokenStream,
     wrapped_method: &TokenStream,
 ) -> TokenStream {
-    let method_name_str = method_name.to_string();
-
     quote! {
         <#sig_tuple as ::godot::builtin::meta::VarcallSignatureTuple>::in_varcall(
             instance_ptr,
-            #method_name_str,
+            & #call_ctx,
             args_ptr,
+            arg_count,
             ret,
             err,
             #wrapped_method,
         )
+    }
+}
+
+fn make_call_context(class_name_str: &str, method_name_str: &str) -> TokenStream {
+    quote! {
+        ::godot::builtin::meta::CallContext::func(#class_name_str, #method_name_str)
     }
 }

@@ -5,11 +5,12 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-mod codegen_enums_test;
-mod codegen_test;
-mod gfile_test;
-mod native_structures_test;
-mod node_test;
-mod save_load_test;
-mod translate_test;
-mod utilities_test;
+mod c_style_enum;
+mod godot_attribute;
+mod godot_convert;
+mod newtype;
+
+pub use c_style_enum::*;
+pub use godot_attribute::*;
+pub use godot_convert::*;
+pub use newtype::*;

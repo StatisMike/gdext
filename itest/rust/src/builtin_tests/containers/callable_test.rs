@@ -85,8 +85,11 @@ fn callable_call() {
     assert_eq!(obj.bind().value, 0);
     callable.callv(varray![10]);
     assert_eq!(obj.bind().value, 10);
+
+    // Too many arguments: this call fails, its logic is not applied.
+    // In the future, panic should be propagated to caller.
     callable.callv(varray![20, 30]);
-    assert_eq!(obj.bind().value, 20);
+    assert_eq!(obj.bind().value, 10);
 
     // TODO(bromeon): this causes a Rust panic, but since call() is routed to Godot, the panic is handled at the FFI boundary.
     // Can there be a way to notify the caller about failed calls like that?
@@ -166,6 +169,10 @@ mod custom_callable {
 
         let sum2 = callable.callv(varray![5]);
         assert_eq!(sum2, 5.to_variant());
+
+        // Important to test 0 arguments, as the FFI call passes a null pointer for the argument array.
+        let sum3 = callable.callv(varray![]);
+        assert_eq!(sum3, 0.to_variant());
     }
 
     #[itest]
