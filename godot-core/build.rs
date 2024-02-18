@@ -12,24 +12,26 @@ fn main() {
     // struggle with static analysis when symbols are outside the crate directory (April 2023).
     let gen_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src/gen"));
 
-    if gen_path.exists() {
+    if gen_path.is_dir() {
         // To handle some CI errors
         let mut retry_count = 0;
 
         loop {
-           match std::fs::remove_dir_all(gen_path) {
-            Ok(_) => break,
-            Err(err) => {
-                if retry_count >= 5 {
-                    panic!("failed to delete dir: {err} in path: {}", gen_path.display());
-                }
-                retry_count += 1;
-                std::thread::sleep(std::time::Duration::from_secs(retry_count));
-            },
-            }    
+            if gen_path.is_dir() {
+                match std::fs::remove_dir_all(gen_path) {
+                    Ok(_) => break,
+                    Err(err) => {
+                        if retry_count >= 5 {
+                            panic!("retries: {retry_count} failed to delete dir: {err} in path: {}", gen_path.display());
+                        }
+                        retry_count += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(10 * retry_count));
+                    },
+                } 
+            } else {
+                break;
+            }
         }
-
-        std::fs::remove_dir_all(gen_path).unwrap_or_else(|e| panic!("failed to delete dir: {e}"));
     }
 
     godot_codegen::generate_core_files(gen_path);

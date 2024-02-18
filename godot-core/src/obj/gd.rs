@@ -13,7 +13,7 @@ use godot_ffi as sys;
 use sys::{static_assert_eq_size, VariantType};
 
 use crate::builtin::meta::{
-    ConvertError, FromFfiError, FromGodot, GodotConvert, GodotType, ToGodot,
+    CallContext, ConvertError, FromFfiError, FromGodot, GodotConvert, GodotType, ToGodot,
 };
 use crate::builtin::{Callable, NodePath, StringName, Variant};
 use crate::obj::raw::RawGd;
@@ -423,7 +423,8 @@ impl<T: GodotClass> Gd<T> {
         Self::from_obj_sys_weak_or_none(ptr).unwrap()
     }
 
-    pub(crate) fn obj_sys(&self) -> sys::GDExtensionObjectPtr {
+    #[doc(hidden)]
+    pub fn obj_sys(&self) -> sys::GDExtensionObjectPtr {
         self.raw.obj_sys()
     }
 
@@ -538,7 +539,7 @@ where
         // Skip check during panic unwind; would need to rewrite whole thing to use Result instead. Having BOTH panic-in-panic and bad type is
         // a very unlikely corner case.
         if !is_panic_unwind {
-            self.raw.check_dynamic_type("free");
+            self.raw.check_dynamic_type(&CallContext::gd::<T>("free"));
         }
 
         // SAFETY: object must be alive, which was just checked above. No multithreading here.
@@ -571,12 +572,12 @@ impl<T: GodotClass> GodotConvert for Gd<T> {
 
 impl<T: GodotClass> ToGodot for Gd<T> {
     fn to_godot(&self) -> Self::Via {
-        self.raw.check_rtti("Gd<T>::to_godot");
+        self.raw.check_rtti("to_godot");
         self.clone()
     }
 
     fn into_godot(self) -> Self::Via {
-        self.raw.check_rtti("Gd<T>::into_godot");
+        self.raw.check_rtti("into_godot");
         self
     }
 }
